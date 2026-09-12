@@ -1,0 +1,38 @@
+MIT License
+
+Copyright (c) 2026 sanfeng (GitHub: HaiYu-22)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+第三方内容与商标声明 / Third-party notices and trademarks
+================================================================================
+
+1. DeepSeek 标志与品牌色
+   本仓库中的 `assets/deepseek-logo.svg` 取自 DeepSeek Harness 前端自带的
+   favicon 资源，`dsh-harness.ico` / `dsh-harness.png` 由该标志渲染而成，
+   使用的品牌蓝为 #4D6BFE。
+
+   DeepSeek 名称、鲸鱼标志及相关商标归 DeepSeek 所有。上述文件仅用于标识
+   本工具所启动的软件，**不在本 MIT 许可证的授权范围内**，也不表示 DeepSeek
+   对本项目的认可或关联。如需商用或再分发，请自行确认商标使用合规性。
+
+2. 本项目为社区非官方工具，与 DeepSeek 官方无任何隶属或合作关系。
+
+3. 本工具启动的 DeepSeek Harness（`@deepseek-ai/dsh`）遵循其自身许可证。

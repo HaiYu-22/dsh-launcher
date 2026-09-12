@@ -1,0 +1,27 @@
+# 打包中间产物
+build/
+dist/
+*.spec
+
+# exe 走 GitHub Releases，不进仓库
+*-old.exe
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本机配置（每个人自己放 exe 旁边的覆盖配置，不该进版本库）
+dsh_launcher.json
+
+# 生成的图标变体（dsh-harness.ico/.png 会提交，其余由 make_logo_icon.py 生成）
+dsh-harness-white-on-blue.ico
+dsh-harness-white-on-blue.png
+dsh-harness.icns
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
