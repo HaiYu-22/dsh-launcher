@@ -56,8 +56,18 @@ IS_MACOS = sys.platform == "darwin"
 
 # dsh 0.1.5+ 对不带 token 的请求返回 401，响应体固定包含这句话
 AUTH_REQUIRED_MARKER = "authentication required"
-# 启动横幅里的可用地址（可能带 ?token=...）
+# dsh 启动横幅里的可用地址（可能带 ?token=...）
 URL_IN_LINE_RE = re.compile(r"(https?://[^\s]+)")
+# dsh 自己交接默认浏览器时打印的提示 / 交接失败时的报错（用于兜底）
+BROWSER_HANDOFF_LINE = "opening the default browser"
+BROWSER_FAILED_MARKER = "could not open the default browser"
+# 子进程输出里出现这些词，多半是 dsh 的 CLI 变了（参数被改名/删除）
+CLI_DRIFT_MARKERS = (
+    "unknown option", "unknown argument", "unrecognized", "unknown command",
+    "invalid option", "too many arguments",
+)
+# 我们依赖的 dsh web 参数：--selftest 会去 `dsh web --help` 里核对它们还在不在
+DSH_WEB_FLAGS = ("--host", "--port", "--no-open")
 
 
 # --------------------------------------------------------------------------
@@ -94,8 +104,11 @@ DEFAULTS = {
     "open_browser": True,
     # dsh 启动器级参数；默认走 web profile
     "dsh_args": ["web"],
-    # dsh 应用级参数（跟在 dsh_args 之后），支持 {host} {port} {workspace} 占位符
-    "app_args": ["--host", "{host}", "--port", "{port}", "--no-open"],
+    # dsh 应用级参数（跟在 dsh_args 之后），支持 {host} {port} {workspace} 占位符。
+    # 这里故意**不写** --no-open：浏览器交给 dsh 自己交接，它会用带 token 的地址打开，
+    # 这样"能不能打开网页"就不依赖我们解析它的启动横幅了（横幅改了也照常打开）。
+    # 只有确实不需要打开浏览器时，才在 browser_handoff_plan() 里动态补 --no-open。
+    "app_args": ["--host", "{host}", "--port", "{port}"],
     "reuse_existing": True,
     "startup_timeout": 180,
     "pause_on_error": True,
@@ -417,23 +430,87 @@ def find_dsh_entry() -> Path | None:
     return None
 
 
-def resolve_dsh_command(cfg: dict) -> list[str] | None:
-    """拼出完整启动命令：优先直接调用 node + bin.js，其次退回 PATH 上的 dsh。"""
-    tail = list(cfg.get("dsh_args") or []) + apply_app_args(cfg)
+def dsh_version(entry: Path | None = None) -> str | None:
+    """从 dsh 安装目录的 package.json 读出当前版本（用于日志和体检）。"""
+    entry = entry or find_dsh_entry()
+    if not entry:
+        return None
+    try:
+        # <...>/@deepseek-ai/dsh/lib/bin.js -> <...>/@deepseek-ai/dsh/package.json
+        data = json.loads((entry.parent.parent / "package.json").read_text(encoding="utf-8"))
+        return str(data.get("version") or "") or None
+    except Exception:
+        return None
+
+
+def dsh_prefix() -> list[str] | None:
+    """dsh 的可执行前缀：优先 node + bin.js，其次 PATH 上的 dsh。"""
     node = find_node()
     entry = find_dsh_entry()
     if node and entry:
-        cfg["_how"] = f"node + {entry}"
-        return [node, str(entry), *tail]
+        return [node, str(entry)]
     shim = shutil.which("dsh") or shutil.which("dsh.cmd")
     if shim:
-        cfg["_how"] = f"PATH 上的 {shim}"
-        return [shim, *tail]
-    if node and entry is None:
+        return [shim]
+    return None
+
+
+def check_cli_contract(cfg: dict) -> tuple[bool | None, list[str]]:
+    """跑一次 `dsh web --help`，确认我们依赖的参数还在。
+
+    返回 (True/False/None, 缺失的参数列表)。这是"dsh 升级后会不会坏"的早期预警：
+    参数被改名或删除时，这里会先报出来，而不是等启动失败。
+    """
+    prefix = dsh_prefix()
+    if not prefix:
+        return None, []
+    probe = [*prefix, *[str(a) for a in (cfg.get("dsh_args") or [])], "--help"]
+    try:
+        proc = subprocess.run(
+            probe, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=90,
+        )
+    except Exception:
+        return None, []
+    text = (proc.stdout or "") + (proc.stderr or "")
+    if not text.strip():
+        return None, []
+    missing = [flag for flag in DSH_WEB_FLAGS if flag not in text]
+    return (not missing), missing
+
+
+def browser_handoff_plan(cfg: dict) -> tuple[list[str], str]:
+    """决定"由谁打开浏览器"，并返回需要补上的参数。
+
+    返回 (额外参数, 谁打开)：
+      "dsh"  : 让 dsh 自己交接默认浏览器（用带 token 的地址，最稳，不依赖解析横幅）
+      "self" : 启动器自己打开（配置里显式写了 --no-open 时）
+      "none" : 不打开
+
+    这样即使 dsh 以后改了启动横幅的措辞，打开网页这件事依然由 dsh 官方路径完成。
+    """
+    app_args = [str(a) for a in (cfg.get("app_args") or [])]
+    has_no_open = "--no-open" in app_args
+    if not cfg.get("open_browser"):
+        return ([] if has_no_open else ["--no-open"]), "none"
+    if has_no_open:
+        return [], "self"
+    return [], "dsh"
+
+
+def resolve_dsh_command(cfg: dict) -> list[str] | None:
+    """拼出完整启动命令：优先直接调用 node + bin.js，其次退回 PATH 上的 dsh。"""
+    extra, who = browser_handoff_plan(cfg)
+    cfg["_browser_handoff"] = who
+    prefix = dsh_prefix()
+    if not prefix:
         cfg["_how"] = "未找到"
         return None
-    cfg["_how"] = "未找到"
-    return None
+    node = find_node()
+    entry = find_dsh_entry()
+    cfg["_how"] = f"node + {entry}" if (node and entry) else f"PATH 上的 {prefix[0]}"
+    tail = [*[str(a) for a in (cfg.get("dsh_args") or [])], *apply_app_args(cfg), *extra]
+    return [*prefix, *tail]
 
 
 # --------------------------------------------------------------------------
@@ -825,7 +902,26 @@ def run_server(cfg: dict) -> int:
     except Exception as exc:
         return fail(cfg, f"启动失败: {exc}", 5)
 
-    captured: dict[str, str | None] = {"url": None}
+    captured: dict[str, object] = {"url": None, "handoff": False, "failed": False, "tail": []}
+
+    def note_line(text: str) -> None:
+        tail = captured["tail"]
+        if isinstance(tail, list):
+            tail.append(text)
+            if len(tail) > 40:
+                del tail[:-40]
+        if captured["url"] is None:
+            found = token_url_from_line(text)
+            if found:
+                captured["url"] = found
+        if BROWSER_HANDOFF_LINE in text:
+            captured["handoff"] = True
+        if BROWSER_FAILED_MARKER in text:
+            captured["failed"] = True
+            # dsh 自己开浏览器失败了，这里兜底打开
+            if cfg.get("_browser_handoff") == "dsh" and cfg.get("open_browser"):
+                say("[!] dsh 报告无法打开默认浏览器，改由本启动器打开。")
+                open_browser(str(captured["url"] or url))
 
     def pump() -> None:
         stream = proc.stdout
@@ -834,10 +930,7 @@ def run_server(cfg: dict) -> int:
         try:
             for line in stream:
                 text = line.rstrip("\n")
-                if captured["url"] is None:
-                    found = token_url_from_line(text)
-                    if found:
-                        captured["url"] = found
+                note_line(text)
                 say(text)
         except Exception:
             pass
@@ -859,6 +952,10 @@ def run_server(cfg: dict) -> int:
     if not ready and proc.poll() is not None:
         code = proc.returncode
         say("")
+        tail = " ".join(str(x) for x in (captured.get("tail") or []))
+        if any(mark in tail.lower() for mark in CLI_DRIFT_MARKERS):
+            say("[!] 看起来 dsh 的 CLI 参数已经变了（上面有 unknown option 之类的报错）。")
+            say("    启动器可能跟不上新版 dsh 了，请先运行 `DeepSeekHarness.exe --selftest` 看契约检查结果。")
         return fail(cfg, f"dsh 进程提前退出（退出码 {code}），服务未能启动。", 6 if code == 0 else code)
 
     # 给抓取线程一点时间把地址那行读完
@@ -875,12 +972,25 @@ def run_server(cfg: dict) -> int:
         say(f"[OK] {APP_TITLE} 已就绪: {open_url}")
 
     if captured["url"]:
-        save_session_state(captured["url"], cfg["port"], proc.pid)
+        save_session_state(str(captured["url"]), cfg["port"], proc.pid)
     else:
         say("[!] 没能从 dsh 输出里抓到带 token 的地址（新版 dsh 会要求 token）。")
         say("    如果页面提示需要认证，请看本窗口上方 `dsh web: ...` 那行并手动打开。")
 
-    if cfg["open_browser"]:
+    # 浏览器交给谁打开：优先让 dsh 自己交接（不依赖解析它的横幅）
+    handoff = cfg.get("_browser_handoff", "self")
+    if handoff == "dsh":
+        say("[*] 浏览器由 dsh 自己打开（它会用带 token 的地址）。")
+        waited = 0.0
+        while waited < 3.0 and proc.poll() is None:
+            if captured["handoff"] or captured["failed"]:
+                break
+            time.sleep(0.2)
+            waited += 0.2
+        if not captured["handoff"] and not captured["failed"]:
+            say("[!] 没看到 dsh 的浏览器交接提示，改由本启动器打开。")
+            open_browser(open_url)
+    elif handoff == "self" and cfg["open_browser"]:
         open_browser(open_url)
 
     say("")
@@ -934,8 +1044,23 @@ def selftest(cfg: dict) -> int:
     say(f"  node            : {node or '未找到'}")
     entry = find_dsh_entry()
     say(f"  dsh 入口        : {entry or '未找到'}")
+    say(f"  dsh 版本        : {dsh_version(entry) or '未知'}")
     command = resolve_dsh_command(cfg)
     say(f"  启动命令        : {' '.join(command) if command else '不可用'}")
+    say(f"  浏览器由谁打开  : {cfg.get('_browser_handoff', '?')} "
+        f"（dsh=交给 dsh 自己交接，self=启动器代劳，none=不打开）")
+
+    # CLI 契约检查：确认我们依赖的参数在新版 dsh 里还在
+    ok, missing = check_cli_contract(cfg)
+    if ok is None:
+        say("  参数契约        : 无法检查（dsh web --help 没跑起来）")
+    elif ok:
+        say(f"  参数契约        : 正常（{'、'.join(DSH_WEB_FLAGS)} 都在）")
+    else:
+        say(f"  参数契约        : 异常！`dsh web --help` 里找不到 {'、'.join(missing)}")
+        say("                    → dsh 的 CLI 变了，启动器需要更新；")
+        say("                      可先手动跑 `dsh web --help` 对比参数名。")
+
     occupied = port_open(cfg["host"], cfg["port"])
     kind = probe_url(cfg["url"]) if occupied else None
     if occupied and kind == "dsh":
@@ -946,8 +1071,14 @@ def selftest(cfg: dict) -> int:
         state = "空闲（可以正常启动）"
     say(f"  端口 {cfg['port']} 状态 : {state}")
     say("")
-    say("体检完成。" if command else "体检发现问题：无法定位 dsh，请检查 Node.js / 全局安装。")
-    return 0 if command else 4
+    if not command:
+        say("体检发现问题：无法定位 dsh，请检查 Node.js / 全局安装。")
+        return 4
+    if ok is False:
+        say("体检发现问题：dsh 参数契约不匹配（见上）。")
+        return 5
+    say("体检完成。")
+    return 0
 
 
 def list_workspaces() -> int:
