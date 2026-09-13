@@ -96,8 +96,26 @@ DeepSeekHarness.exe --list-workspaces         # 看 DSH 记录过哪些工作区
 | `.icon-style` | 记录当前是哪套配色；换配色后重新打包会据此重画，避免 exe 与快捷方式图标对不上 |
 | `dist\DeepSeekHarness.exe` | 打包产物 |
 | `dsh_launcher.json`（可选） | 放 exe 同目录即可改默认行为，不用重新打包 |
+| `%USERPROFILE%\.dsh\launcher-session.json` | 运行时生成：记录当前实例**带 token 的可用地址**，用于复用实例时打开正确页面 |
 
-## 四、常用参数
+## 四、关于"进程 token"（dsh 0.1.5+ 起）
+
+从 dsh **0.1.5** 开始，Web GUI 增加了进程 token 保护：
+
+- 不带 token 访问 `http://127.0.0.1:3080/` 会返回 **401**，响应体是
+  `dsh web authentication required; reopen the URL printed by dsh web.`
+- 必须用 dsh 启动时打印的那行带 `?token=...` 的地址打开一次，
+  浏览器会用它换到一个持久 cookie，之后就正常了。
+- 这个 token 只存在于进程内存里，**不落盘**。
+
+启动器已经适配：它从 dsh 的输出里抓 `dsh web: <带 token 的地址>` 这行，用它打开浏览器；
+同时把它记到 `%USERPROFILE%\.dsh\launcher-session.json`，所以**下次复用已有实例时也能打开可用页面**。
+
+> 如果你是在**旧版启动器**拉起的实例上遇到"网页打不开"：关掉那个 DSH 窗口，
+> 用桌面快捷方式重新打开一次即可（新实例会重新抓取并记录 token）。
+> 也可以手动到 DSH 窗口里复制 `dsh web:` 开头的整行链接打开一次。
+
+## 五、常用参数
 
 | 参数 | 说明 |
 |---|---|
@@ -129,7 +147,7 @@ DeepSeekHarness.exe --list-workspaces         # 看 DSH 记录过哪些工作区
 }
 ```
 
-## 五、重新打包 / 重建快捷方式
+## 六、重新打包 / 重建快捷方式
 
 ```powershell
 cd <本仓库目录>
@@ -148,7 +166,7 @@ python make_logo_icon.py --ascii            # 终端里字符画预览图标
 改名成 `DeepSeekHarness-old.exe` 让位（正在运行的窗口完全不受影响），下次启动才换新版本；
 那个 `-old.exe` 会在下一次打包时自动清理。
 
-## 六、macOS 上怎么用
+## 七、macOS 上怎么用
 
 exe 是 Windows 专用的，macOS 用同一个 `dsh_launcher.py`：
 
@@ -162,7 +180,11 @@ python3 build_and_install.py
 > 这部分代码写好了但这台机器是 Windows，**没有实机验证过**。macOS 上图标渲染会优先用
 > 本机 Chrome/Edge 无头模式；都没有时退回内置的纯 Python 光栅化器（离线可用）。
 
-## 七、常见问题
+## 八、常见问题
+
+**网页打不开 / 页面提示 `dsh web authentication required`？**
+见上面第四节：dsh 0.1.5+ 需要进程 token。启动器会自动抓取并打开带 token 的地址；
+若你正开着的是**旧版启动器**拉起的实例（没有记录），关掉它、用快捷方式重开一次即可。
 
 **双击后黑窗口一闪就没了？**
 看 `%USERPROFILE%\.dsh\launcher.log` 最后几行，或跑 `DeepSeekHarness.exe --selftest`。
@@ -192,7 +214,7 @@ python3 build_and_install.py
 **`DSH_HOME` 没设置会不会跑错目录？**
 不会。未设置时会自动指向已存在的 `%USERPROFILE%\.dsh`，与在终端里启动的行为一致。
 
-## 八、声明
+## 九、声明
 
 - 本项目是**社区非官方工具**，与 DeepSeek 无隶属或合作关系。
 - 仓库内 `assets/deepseek-logo.svg` 及由其渲染的 `dsh-harness.ico` / `.png` 使用

@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -52,6 +53,11 @@ from pathlib import Path
 APP_TITLE = "DeepSeek Harness"
 IS_WINDOWS = os.name == "nt"
 IS_MACOS = sys.platform == "darwin"
+
+# dsh 0.1.5+ 对不带 token 的请求返回 401，响应体固定包含这句话
+AUTH_REQUIRED_MARKER = "authentication required"
+# 启动横幅里的可用地址（可能带 ?token=...）
+URL_IN_LINE_RE = re.compile(r"(https?://[^\s]+)")
 
 
 # --------------------------------------------------------------------------
@@ -594,24 +600,97 @@ def port_open(host: str, port: int, timeout: float = 0.8) -> bool:
     return False
 
 
+def looks_like_dsh(body: str) -> bool:
+    return "DeepSeek Harness" in body or "__DSH_BOOT__" in body
+
+
 def probe_url(url: str, timeout: float = 2.5) -> str | None:
-    """返回 'dsh' / 'other' / None(无响应)。"""
+    """返回 'dsh' / 'other' / None(无响应)。
+
+    注意：从 dsh 0.1.5 起，Web GUI 用"进程 token"保护，不带 token 访问 / 会返回
+    401 + 固定文案。这也算"DSH 正在运行"，不能当成别的程序占用端口。
+    """
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "dsh-launcher"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read(300_000).decode("utf-8", "replace")
-        if "DeepSeek Harness" in body or "__DSH_BOOT__" in body:
+        return "dsh" if looks_like_dsh(body) else "other"
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read(20_000).decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        if exc.code in (401, 403) and AUTH_REQUIRED_MARKER in body:
             return "dsh"
-        return "other"
-    except urllib.error.HTTPError:
         return "other"
     except Exception:
         return None
 
 
 # --------------------------------------------------------------------------
-# 启动 / 复用
+# 会话地址记录
+#
+# dsh 0.1.5+ 的 Web GUI 需要"进程 token"：启动时打印的地址形如
+#     dsh web: http://127.0.0.1:3080/?token=xxxx
+# 这个 token 只存在于进程内存里（不落盘），浏览器用它换一个持久 cookie。
+# 所以启动器必须：
+#   1. 从子进程输出里抓到这个带 token 的地址，用它打开浏览器；
+#   2. 把它记下来，下次"复用已有实例"时才能依然打开可用的页面。
 # --------------------------------------------------------------------------
+def session_state_file() -> Path:
+    return dsh_home() / "launcher-session.json"
+
+
+def save_session_state(url: str, port: int, pid: int | None) -> None:
+    try:
+        path = session_state_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({
+                "url": url,
+                "port": port,
+                "pid": pid,
+                "savedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        say(f"[!] 记录会话地址失败: {exc}")
+
+
+def load_session_state() -> dict:
+    try:
+        data = json.loads(session_state_file().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def clear_session_state() -> None:
+    try:
+        session_state_file().unlink()
+    except OSError:
+        pass
+
+
+def token_url_from_line(line: str) -> str | None:
+    """从 dsh 的输出行里取出带 token 的地址（形如 `dsh web: http://...?token=...`）。"""
+    if "dsh web:" not in line:
+        return None
+    match = URL_IN_LINE_RE.search(line)
+    return match.group(1) if match else None
+
+
+def reuse_url_for(port: int, bare_url: str) -> tuple[str, bool]:
+    """复用已有实例时，优先用上次记录的带 token 地址。返回 (地址, 是否带 token 有效)。"""
+    state = load_session_state()
+    if state.get("port") == port and isinstance(state.get("url"), str):
+        recorded = state["url"]
+        if probe_url(recorded, timeout=2.0) == "dsh":
+            return recorded, True
+    return bare_url, False
+
+
 def open_browser(url: str) -> None:
     say(f"[*] 正在打开浏览器: {url}")
     try:
@@ -675,8 +754,15 @@ def run_server(cfg: dict) -> int:
         if kind == "dsh":
             if cfg["reuse_existing"]:
                 say(f"[=] 检测到 {APP_TITLE} 已在 {url} 运行，直接复用现有实例。")
+                target, fresh = reuse_url_for(cfg["port"], url)
+                if fresh:
+                    say("[*] 使用上次记录的带 token 地址打开。")
+                else:
+                    say("[!] 没有可用的带 token 地址（这个实例不是本启动器拉起的，或它重启过）。")
+                    say("    新版 dsh 需要进程 token；若页面提示需要认证，请到那个实例的窗口里")
+                    say("    复制它以 `dsh web:` 开头打印的完整链接打开一次（浏览器会记住 cookie）。")
                 if cfg["open_browser"]:
-                    open_browser(url)
+                    open_browser(target)
                 time.sleep(max(0.0, float(cfg["reuse_exit_delay"])))
                 return 0
             return fail(
@@ -722,14 +808,14 @@ def run_server(cfg: dict) -> int:
     # --- 4) 准备子进程环境 ---
     env = child_env()
 
-    log_only = _log_stream is not None and not has_console()
+    # 始终用管道接管子进程输出：既要写日志/控制台，也要从里面抓带 token 的地址
     try:
         proc = subprocess.Popen(
             command,
             cwd=str(workspace),
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=_log_stream if log_only else subprocess.PIPE,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
@@ -739,18 +825,24 @@ def run_server(cfg: dict) -> int:
     except Exception as exc:
         return fail(cfg, f"启动失败: {exc}", 5)
 
+    captured: dict[str, str | None] = {"url": None}
+
     def pump() -> None:
         stream = proc.stdout
         if stream is None:
             return
         try:
             for line in stream:
-                say(line.rstrip("\n"))
+                text = line.rstrip("\n")
+                if captured["url"] is None:
+                    found = token_url_from_line(text)
+                    if found:
+                        captured["url"] = found
+                say(text)
         except Exception:
             pass
 
-    if not log_only:
-        threading.Thread(target=pump, name="dsh-output", daemon=True).start()
+    threading.Thread(target=pump, name="dsh-output", daemon=True).start()
 
     # --- 5) 等服务就绪 ---
     deadline = time.time() + max(5, int(cfg["startup_timeout"]))
@@ -758,7 +850,8 @@ def run_server(cfg: dict) -> int:
     while time.time() < deadline:
         if proc.poll() is not None:
             break
-        if port_open(cfg["host"], cfg["port"]) and probe_url(url, timeout=2.0) == "dsh":
+        target = captured["url"] or url
+        if port_open(cfg["host"], cfg["port"]) and probe_url(target, timeout=2.0) == "dsh":
             ready = True
             break
         time.sleep(0.5)
@@ -768,14 +861,27 @@ def run_server(cfg: dict) -> int:
         say("")
         return fail(cfg, f"dsh 进程提前退出（退出码 {code}），服务未能启动。", 6 if code == 0 else code)
 
+    # 给抓取线程一点时间把地址那行读完
+    for _ in range(10):
+        if captured["url"]:
+            break
+        time.sleep(0.2)
+    open_url = captured["url"] or url
+
     if not ready:
         say(f"[!] 等待 {cfg['startup_timeout']} 秒仍未就绪，先尝试打开浏览器…")
     else:
         say("")
-        say(f"[OK] {APP_TITLE} 已就绪: {url}")
+        say(f"[OK] {APP_TITLE} 已就绪: {open_url}")
+
+    if captured["url"]:
+        save_session_state(captured["url"], cfg["port"], proc.pid)
+    else:
+        say("[!] 没能从 dsh 输出里抓到带 token 的地址（新版 dsh 会要求 token）。")
+        say("    如果页面提示需要认证，请看本窗口上方 `dsh web: ...` 那行并手动打开。")
 
     if cfg["open_browser"]:
-        open_browser(url)
+        open_browser(open_url)
 
     say("")
     say("[*] 服务运行中。关闭本窗口或按 Ctrl+C 即可停止 DeepSeek Harness。")
