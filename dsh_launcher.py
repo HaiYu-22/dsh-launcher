@@ -758,12 +758,28 @@ def token_url_from_line(line: str) -> str | None:
     return match.group(1) if match else None
 
 
+def probe_authenticated(url: str, timeout: float = 2.5) -> bool:
+    """这个带 token 的地址现在**真的能用**吗（HTTP 200 + DSH 页面）。
+
+    注意不能复用 probe_url：它对"401 需要认证"也返回 'dsh'（那是判断端口上
+    有没有 DSH 用的）。而这里要判断的是 token 有没有过期 —— 服务重启后旧 token
+    会返回 401，此时绝不能拿它去开浏览器，否则用户看到的是"需要认证"的空白页。
+    """
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "dsh-launcher"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(300_000).decode("utf-8", "replace")
+        return looks_like_dsh(body)
+    except Exception:
+        return False
+
+
 def reuse_url_for(port: int, bare_url: str) -> tuple[str, bool]:
-    """复用已有实例时，优先用上次记录的带 token 地址。返回 (地址, 是否带 token 有效)。"""
+    """复用已有实例时，优先用上次记录的带 token 地址（仅当它仍然有效）。"""
     state = load_session_state()
     if state.get("port") == port and isinstance(state.get("url"), str):
         recorded = state["url"]
-        if probe_url(recorded, timeout=2.0) == "dsh":
+        if probe_authenticated(recorded):
             return recorded, True
     return bare_url, False
 
